@@ -41,18 +41,18 @@ PYPI_DEPS=" \
 python_dateutil==1.5 \
 "
 
-MOZAUTOLOG_REPO=http://hg.mozilla.org/users/jgriffin_mozilla.com/mozautolog/
-MOZAUTOESLIB=http://hg.mozilla.org/automation/mozautoeslib/
+#MOZAUTOLOG_REPO=http://hg.mozilla.org/users/jgriffin_mozilla.com/mozautolog/
+#MOZAUTOESLIB=http://hg.mozilla.org/automation/mozautoeslib/
 
 virtualenv .
 ./bin/easy_install $PYPI_DEPS
 
 # Clone/install custom Mozilla eggs
-for I in $MOZAUTOLOG_REPO $MOZAUTOESLIB; do
-    PKGNAME=$(basename $I)
-    hg clone $I src/$PKGNAME
-    ./bin/easy_install src/$PKGNAME
-done
+#for I in $MOZAUTOLOG_REPO $MOZAUTOESLIB; do
+#    PKGNAME=$(basename $I)
+#    hg clone $I src/$PKGNAME
+#   ./bin/easy_install src/$PKGNAME
+#done
 
 # Install our own custom copy of templeton
 git submodule init && git submodule update

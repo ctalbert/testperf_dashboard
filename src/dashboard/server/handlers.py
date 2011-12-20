@@ -1,7 +1,8 @@
 from collections import defaultdict
-from datetime import date, datetime, time, timedelta
+from datetime import date, datetime, timedelta
+import time
 from decimal import *
-from mozautoeslib import ESLib
+#from mozautoeslib import ESLib
 import ConfigParser
 import csv
 import dateutil.parser
@@ -9,6 +10,8 @@ import re
 import templeton
 import templeton.handlers
 import web
+import MySQLdb
+import pdb
 
 try:
   import json
@@ -18,113 +21,143 @@ except:
 config = ConfigParser.ConfigParser()
 config.read("settings.cfg")
 ES_SERVER = config.get("database", "ES_SERVER")
-eslib = ESLib(ES_SERVER, config.get("database", "INDEX"), config.get("database", "TYPE"))
+#eslib = ESLib(ES_SERVER, config.get("database", "INDEX"), config.get("database", "TYPE"))
+MYSQL_SERVER = config.get("database", "MYSQL_SERVER")
+MYSQL_PASSWD = config.get("database", "MYSQL_PASSWD")
+MYSQL_USER = config.get("database", "MYSQL_USER")
+MYSQL_DB = config.get("database", "MYSQL_DB")
+MYSQL_TABLE = config.get("database", "MYSQL_TABLE")
 
 # "/api/" is automatically prepended to each of these
 urls = (
  '/perfdata/?',"PerfdataHandler",
- '/xbrowserstartup/?', "CrossBrowserStartupHandler"
+ '/xbrowserstartup/?', "CrossBrowserStartupHandler",
+ '/xbrowserstartup_add/?', "CrossBrowserStartupAddResult"
 )
 
-class PerfdataHandler():
+class CrossBrowserStartupAddResult():
     @templeton.handlers.json_response
     def GET(self):
+        conn = MySQLdb.connect(host = MYSQL_SERVER,
+                               user = MYSQL_USER,
+                               passwd = MYSQL_PASSWD,
+                               db = MYSQL_DB)
         params,body = templeton.handlers.get_request_parms()
 
-        queryparams = defaultdict()
+        p = json.loads(params["data"][0])
+        c = conn.cursor()
+        query = "INSERT INTO " + MYSQL_DB + "." + MYSQL_TABLE + " VALUES(\
+                %s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)"
+        blddate = datetime.fromtimestamp(float(p["testsuites"][0]["starttime"]))
+        now = datetime.now()
+        perfdata = p["testsuites"][0]["perfdata"][0] 
+        testgroup = p["testgroup"]
 
-        #No params supplied -- query everything
-        if not params:
-            queryparams["test"] = "*"
-
-        #Params supplied, query by them
-        for arg in params:
-            #Treat startdate and enddate uniquely (build a daterange for the query)
-            if arg == "startdate" or arg == "enddate":
-                try:
-                    queryparams["date"].append(str(params[arg][0]))
-                except:
-                    queryparams["date"] = []
-                    queryparams["date"].append(str(params[arg][0]))
-            else:
-                queryparams[arg] = params[arg][0]
-
-        #Query based on params supplied, return json
-        result = eslib.query(queryparams)
-        return result
+        # Take the JSON we got and put it in the database
+        c.execute(query, (perfdata["perfdata"][0]["phone"],
+                          perfdata["perfdata"][0]["browser"],
+                          perfdata["perfdata"][0]["type"],
+                          perfdata["perfdata"][0]["result"],
+                          blddate.strftime("%Y-%m-%d %H:%M:%S"),
+                          testgroup["revision"],
+                          testgroup["buildtype"],
+                          testgroup["productname"],
+                          testgroup["platform"],
+                          testgroup["os"],
+                          testgroup["machine"],
+                          testgroup["harness"],
+                          now.strftime("%Y-%m-%d %H:%M:%S")))
 
 class CrossBrowserStartupHandler():
     @templeton.handlers.json_response
     def GET(self):
+        conn = MySQLdb.connect(host = MYSQL_SERVER,
+                               user = MYSQL_USER,
+                               passwd = MYSQL_PASSWD,
+                               db = MYSQL_DB)
+
         params,body = templeton.handlers.get_request_parms()
-        data = defaultdict(lambda: defaultdict(lambda: defaultdict(lambda:defaultdict(list))))
-        timestamps = defaultdict(lambda: defaultdict(lambda: defaultdict(lambda:defaultdict(list))))
 
-        es = ESLib('elasticsearch1.metrics.sjc1.mozilla.com:9200','xbrowserstartup', 'perfdata')
 
-        # Create a version suitable for graphing from this:
-        # {"x-series":["date1","date2",...."enddate"],
-        #  "series":[{"name":"<phone1>-<browser1>",
-        #             "data":[<date_point>, "<date_point>",..."<date_point>"]},
-        #            {"name":"<phone1>-<browser2>",
-        #             "data":[<date_point>, "<date_point>",..."<date_point>"]},
-        #            ...
-        #            {"name":"<phonem>-<browsern>",
-        #             "data":[<date_point>, "<date_point>",..."<date_point>"]}]}
         testname = params["test"][0] + "-" + params["style"][0] + "-startup"
-        xseries = self.get_date_range(params["date"][0])
+
+        #TODO: Optimize queries, there's a much better way to do this, not
+        # thinking of it now, too tired.
+        revq = "SELECT DISTINCT revision FROM " + MYSQL_DB + "." + MYSQL_TABLE
+        phoneq = "SELECT DISTINCT phoneid FROM " + MYSQL_DB + "." + MYSQL_TABLE
+        browserq = "SELECT DISTINCT browserid FROM " + MYSQL_DB + "." + MYSQL_TABLE
+        testq =  "SELECT DISTINCT testname FROM " + MYSQL_DB + "." + MYSQL_TABLE
+        resultq = "SELECT AVG(result), blddate FROM " + MYSQL_DB + "." + MYSQL_TABLE + \
+" WHERE ((DATE_SUB(CURDATE(),INTERVAL " + params["date"][0] + " DAY) <= blddate) \
+AND revision=%s AND phoneid=%s AND browserid=%s AND testname=%s)"
+
         series = []
 
-        # Dates in format YYYY-mm-dd
-        for date in xseries:
-            results = es.query({'date': date})
+        c = conn.cursor()
+        c.execute(revq)
+        revrows = c.fetchall()
 
-            for result in results:
-                perfdata = result['perfdata'][0]
-                data[result['revision']][perfdata['phone']][perfdata['browser']][perfdata['type']].append(perfdata['result'])
-                timestamps[result['revision']][perfdata['phone']][perfdata['browser']][perfdata['type']].append(result['starttime'])
+        c.execute(phoneq)
+        phonerows = c.fetchall()
 
-            # Get averages for each testrun for each browser from this day
-            # Make a point from (date, avg of testrun on phone-browser, phone-browser)
-            for rev in data:
-                for phone in data[rev]:
-                    for browser in data[rev][phone]:
-                        phone_browser = phone + "-" + browser
-                        
-                        # If we do not have data for this revision, then skip
-                        # it.
-                        if len(data[rev][phone][browser][testname]) == 0:
+        c.execute(browserq)
+        browserrows = c.fetchall()
+
+        c.execute(testq)
+        testrows = c.fetchall()
+
+        # TODO: Can this be cleaned up by pushing logic into db
+        for rev in revrows:
+            for phone in phonerows:
+                for browser in browserrows:
+                    phone_browser = phone[0] + "-" + browser[0]
+                    # If our phone browser combo not in the series add it.
+                    # If it is in the list return the index.
+                    # Either way we get the index of the phone_browser
+                    # combo in the list.
+                    idx = self.ensure_in_series(phone_browser, series)
+
+                    for test in testrows:
+                        print resultq % (rev[0], phone[0], browser[0], test[0])
+                        c.execute(resultq, (rev[0],
+                                            phone[0],
+                                            browser[0],
+                                            test[0]))
+                        resultrows = c.fetchall()
+
+                        # If we have no data for this phone-browser test then
+                        # skip it.
+                        if resultrows[0][0] == None:
+                            # DEBUGGING
+                            print "-------------"
+                            print "No data for phone-browser:%s on test %s for rev: %s" % (phone_browser, test[0], rev[0])
                             continue
+                        # There is just one average for this result and bldtime  so push
+                        # into our array
+                        avg = int(resultrows[0][0])
+                        blddate = resultrows[0][1]
 
-                        # If our phone browser combo not in the series add it.
-                        # If it is in the list return the index.
-                        # Either way we get the index of the phone_browser
-                        # combo in the list.
-                        idx = self.ensure_in_series(phone_browser, series)
-
-                        # Get the timestamp from our parallel array - note that
-                        # since we average our results we only need one timestamp
-                        # from the test for this browser, on this phone, on this revision.
-                        tstamp = timestamps[rev][phone][browser][testname][0]
-                        
+                        # Stupid python can't do a totimestamp...
+                        tstamp = time.strptime(blddate.strftime("%Y-%m-%d %H:%M:%S"),
+                                               "%Y-%m-%d %H:%M:%S")
+                        tstamp = time.mktime(tstamp)
                         # Debugging code
                         print "------------"
-                        print "DATE: %s" % datetime.fromtimestamp(float(tstamp)).isoformat()
-                        print "REV: %s" % rev
-                        print "PHONE: %s" % phone
-                        print "BROWSER: %s" % browser
-                        print "TESTARRAY %s" % data[rev][phone][browser][testname]
-                        avg = self.average(data[rev][phone][browser][testname])
-                        if avg == 0:
-                            # Don't add 0's if we are missing data, just skip that point
-                            continue
+                        print "DATE: %s" % blddate.isoformat()
+                        print "TSTAMP: %s" % tstamp
+                        print "REV: %s" % rev[0]
+                        print "PHONE: %s" % phone[0]
+                        print "BROWSER: %s" % browser[0]
+                        print "AVG %s" % avg
 
-                        # Add our point to the series data - our tstamp is in 
+                        # Add our point to the series data - our tstamp is in
                         # secs since EPOC, we need it to be ms since epoc for charts,
                         # so multiply by 1000.
                         series[idx]["data"].append([tstamp * 1000, avg, phone_browser])
 
-        retval = {"xseries": xseries, "series": series}
+
+
+        retval = {"series": series}
         #print retval
         return retval
 
@@ -136,29 +169,3 @@ class CrossBrowserStartupHandler():
         series.append({"name":phone_browser, "data":[]})
         return series.index({"name":phone_browser, "data":[]})
 
-    def average(self, ary):
-        if len(ary) == 0:
-            return 0
-
-        t = 0
-        for i in ary:
-            t = t + i
-        return t/len(ary)
-
-    def get_date_range(self, val):
-        now = date.today()
-        if val == "1w":
-            old = now - timedelta(weeks=1)
-        elif val == "2w":
-            old = now - timedelta(weeks=2)
-        elif val == "1m":
-            old = now - timedelta(weeks=4)
-        else:
-            # Go back maximum of six months
-            old = now - timedelta(weeks=24)
-        dates = []
-
-        while old <= now:
-            dates.append("%s-%s-%s"% (old.year, old.month, old.day))
-            old = old + timedelta(days=1)
-        return dates
