@@ -2,7 +2,6 @@ from collections import defaultdict
 from datetime import date, datetime, timedelta
 import time
 from decimal import *
-#from mozautoeslib import ESLib
 import ConfigParser
 import csv
 import dateutil.parser
@@ -20,8 +19,6 @@ except:
 
 config = ConfigParser.ConfigParser()
 config.read("settings.cfg")
-ES_SERVER = config.get("database", "ES_SERVER")
-#eslib = ESLib(ES_SERVER, config.get("database", "INDEX"), config.get("database", "TYPE"))
 MYSQL_SERVER = config.get("database", "MYSQL_SERVER")
 MYSQL_PASSWD = config.get("database", "MYSQL_PASSWD")
 MYSQL_USER = config.get("database", "MYSQL_USER")
@@ -30,7 +27,6 @@ MYSQL_TABLE = config.get("database", "MYSQL_TABLE")
 
 # "/api/" is automatically prepended to each of these
 urls = (
- '/perfdata/?',"PerfdataHandler",
  '/xbrowserstartup/?', "CrossBrowserStartupHandler",
  '/xbrowserstartup_add/?', "CrossBrowserStartupAddResult"
 )
@@ -67,6 +63,7 @@ class CrossBrowserStartupAddResult():
                           testgroup["machine"],
                           testgroup["harness"],
                           now.strftime("%Y-%m-%d %H:%M:%S")))
+        conn.commit()
 
 class CrossBrowserStartupHandler():
     @templeton.handlers.json_response
@@ -117,45 +114,43 @@ AND revision=%s AND phoneid=%s AND browserid=%s AND testname=%s)"
                     # combo in the list.
                     idx = self.ensure_in_series(phone_browser, series)
 
-                    for test in testrows:
-                        print resultq % (rev[0], phone[0], browser[0], test[0])
-                        c.execute(resultq, (rev[0],
-                                            phone[0],
-                                            browser[0],
-                                            test[0]))
-                        resultrows = c.fetchall()
+                    # testname is one of the parameters to this function
+                    print resultq % (rev[0], phone[0], browser[0], testname)
+                    c.execute(resultq, (rev[0],
+                                        phone[0],
+                                        browser[0],
+                                        testname))
+                    resultrows = c.fetchall()
 
-                        # If we have no data for this phone-browser test then
-                        # skip it.
-                        if resultrows[0][0] == None:
-                            # DEBUGGING
-                            print "-------------"
-                            print "No data for phone-browser:%s on test %s for rev: %s" % (phone_browser, test[0], rev[0])
-                            continue
-                        # There is just one average for this result and bldtime  so push
-                        # into our array
-                        avg = int(resultrows[0][0])
-                        blddate = resultrows[0][1]
+                    # If we have no data for this phone-browser test then
+                    # skip it.
+                    if resultrows[0][0] == None:
+                        # DEBUGGING
+                        print "-------------"
+                        print "No data for phone-browser: %s on test: %s for rev: %s" % (phone_browser, testname, rev[0])
+                        continue
+                    # There is just one average for this result and bldtime  so push
+                    # into our array
+                    avg = int(resultrows[0][0])
+                    blddate = resultrows[0][1]
 
-                        # Stupid python can't do a totimestamp...
-                        tstamp = time.strptime(blddate.strftime("%Y-%m-%d %H:%M:%S"),
-                                               "%Y-%m-%d %H:%M:%S")
-                        tstamp = time.mktime(tstamp)
-                        # Debugging code
-                        print "------------"
-                        print "DATE: %s" % blddate.isoformat()
-                        print "TSTAMP: %s" % tstamp
-                        print "REV: %s" % rev[0]
-                        print "PHONE: %s" % phone[0]
-                        print "BROWSER: %s" % browser[0]
-                        print "AVG %s" % avg
+                    # Stupid python can't do a totimestamp...
+                    tstamp = time.strptime(blddate.strftime("%Y-%m-%d %H:%M:%S"),
+                                            "%Y-%m-%d %H:%M:%S")
+                    tstamp = time.mktime(tstamp)
+                    # Debugging code
+                    print "------------"
+                    print "DATE: %s" % blddate.isoformat()
+                    print "TSTAMP: %s" % tstamp
+                    print "REV: %s" % rev[0]
+                    print "PHONE: %s" % phone[0]
+                    print "BROWSER: %s" % browser[0]
+                    print "AVG %s" % avg
 
-                        # Add our point to the series data - our tstamp is in
-                        # secs since EPOC, we need it to be ms since epoc for charts,
-                        # so multiply by 1000.
-                        series[idx]["data"].append([tstamp * 1000, avg, phone_browser])
-
-
+                    # Add our point to the series data - our tstamp is in
+                    # secs since EPOC, we need it to be ms since epoc for charts,
+                    # so multiply by 1000.
+                    series[idx]["data"].append([tstamp * 1000, avg, phone_browser])
 
         retval = {"series": series}
         #print retval
